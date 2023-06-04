@@ -15,72 +15,131 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <benchmark/benchmark.h>
 #include "ppl/cv/x86/crop.h"
-#include <memory>
+
+#include "opencv2/core.hpp"
+#include "benchmark/benchmark.h"
+
 #include "ppl/cv/debug.h"
-
-namespace {
-
-template<typename T, int32_t nc>
-void BM_Crop_ppl_x86(benchmark::State &state) {
-    int32_t width = state.range(0);
-    int32_t height = state.range(1);
-    int32_t inHeight = height;
-    int32_t inWidth = width;
-    int32_t outHeight = height / 2;
-    int32_t outWidth = width / 2;
-    int32_t left = 20;
-    int32_t top = 20;
-    std::unique_ptr<T[]> src(new T[inWidth * inHeight * nc]);
-    std::unique_ptr<T[]> dst(new T[outWidth * outHeight * nc]);
-    ppl::cv::debug::randomFill<T>(src.get(), inWidth * inHeight * nc, 0, 255);
-    for (auto _ : state) {
-        ppl::cv::x86::Crop<T, nc>(inHeight, inWidth, inWidth * nc, src.get(),
-                                outHeight, outWidth, outWidth * nc, dst.get(),
-                                left, top, 1.0f);
-    }
-    state.SetItemsProcessed(state.iterations() * 1);
-}
+#include "utility/infrastructure.hpp"
 
 using namespace ppl::cv::debug;
-BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, uint8_t, c1)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, uint8_t, c3)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, uint8_t, c4)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, float, c1)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, float, c3)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, float, c4)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
 
+template<typename T, int channels, int left, int top, int int_scale>
+void BM_Crop_ppl_x86(benchmark::State &state) {
+    int width  = state.range(0);
+    int height = state.range(1);
+    int src_width  = width * 2;
+    int src_height = height * 2;
+    cv::Mat src = createSourceImage(src_height, src_width,
+                            CV_MAKETYPE(cv::DataType<T>::depth, channels));
+    cv::Mat dst(height, width, CV_MAKETYPE(cv::DataType<T>::depth, channels));
 
-#ifdef PPLCV_BENCHMARK_OPENCV
-template<typename T, int32_t nc>
-void BM_Crop_opencv_x86(benchmark::State &state) {
-    int32_t width = state.range(0);
-    int32_t height = state.range(1);
-    int32_t inHeight = height;
-    int32_t inWidth = width;
-    int32_t outHeight = height / 2;
-    int32_t outWidth = width / 2;
-    int32_t left = 20;
-    int32_t top = 20;
-    std::unique_ptr<T[]> src(new T[inWidth * inHeight * nc]);
-    std::unique_ptr<T[]> dst(new T[outWidth * outHeight * nc]);
-    cv::Mat srcMat(inHeight, inWidth, CV_MAKETYPE(cv::DataType<T>::depth, nc), src.get(), sizeof(T) * inWidth * nc);
-    cv::Mat dstMat(outHeight, outWidth, CV_MAKETYPE(cv::DataType<T>::depth, nc), dst.get(), sizeof(T) * outWidth * nc);
-    cv::Rect roi(left, top, outWidth, outHeight);
+    float scale = int_scale / 10.f;
+
+    int warmup_iters = 5;
+    int perf_iters = 50;
+
+    // Warm up the CPU.
+    for (int i = 0; i < warmup_iters; i++) {
+        ppl::cv::x86::Crop<T, channels>(src.rows, src.cols,
+            src.step / sizeof(T), (T*)src.data, dst.rows, dst.cols,
+            dst.step / sizeof(T), (T*)dst.data, left, top, scale);
+    }
+
     for (auto _ : state) {
-        cv::Rect roi(left, top, outWidth, outHeight);
-        cv::Mat croppedImage = srcMat(roi);
-        croppedImage.copyTo(dstMat);
+        auto time_start = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < perf_iters; i++) {
+            ppl::cv::x86::Crop<T, channels>(src.rows, src.cols,
+                src.step / sizeof(T), (T*)src.data, dst.rows, dst.cols,
+                dst.step / sizeof(T), (T*)dst.data, left, top, scale);
+        }
+        auto time_end = std::chrono::high_resolution_clock::now();
+        auto duration = time_end - time_start;
+        auto overall_time = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        double time = overall_time * 1.0 / perf_iters;
+        state.SetIterationTime(time * 1e-6);
     }
     state.SetItemsProcessed(state.iterations() * 1);
 }
 
-BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, uint8_t, c1)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, uint8_t, c3)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, uint8_t, c4)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, float, c1)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, float, c3)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, float, c4)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-#endif //! PPLCV_BENCHMARK_OPENCV
+#define RUN_PPL_CV_TYPE_FUNCTIONS(type, top, left, scale)                      \
+BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, type, c1, top, left, scale)->             \
+                   Args({640, 480})->UseManualTime()->Iterations(10);          \
+BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, type, c3, top, left, scale)->             \
+                   Args({640, 480})->UseManualTime()->Iterations(10);          \
+BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, type, c4, top, left, scale)->             \
+                   Args({640, 480})->UseManualTime()->Iterations(10);          \
+BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, type, c1, top, left, scale)->             \
+                   Args({1920, 1080})->UseManualTime()->Iterations(10);        \
+BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, type, c3, top, left, scale)->             \
+                   Args({1920, 1080})->UseManualTime()->Iterations(10);        \
+BENCHMARK_TEMPLATE(BM_Crop_ppl_x86, type, c4, top, left, scale)->             \
+                   Args({1920, 1080})->UseManualTime()->Iterations(10);
+
+RUN_PPL_CV_TYPE_FUNCTIONS(uint8_t, 16, 16, 10)
+RUN_PPL_CV_TYPE_FUNCTIONS(uint8_t, 16, 16, 15)
+RUN_PPL_CV_TYPE_FUNCTIONS(float, 16, 16, 10)
+RUN_PPL_CV_TYPE_FUNCTIONS(float, 16, 16, 15)
+
+#ifdef PPLCV_BENCHMARK_OPENCV
+template <typename T, int channels, int left, int top, int int_scale>
+void BM_Crop_opencv_x86(benchmark::State &state) {
+    int width  = state.range(0);
+    int height = state.range(1);
+    int src_width  = width * 2;
+    int src_height = height * 2;
+    cv::Mat src = createSourceImage(src_height, src_width,
+                            CV_MAKETYPE(cv::DataType<T>::depth, channels));
+    cv::Mat dst(height, width, CV_MAKETYPE(cv::DataType<T>::depth, channels));
+
+    float scale = int_scale / 10.f;
+
+    int warmup_iters = 5;
+    int perf_iters = 50;
+
+    // Warm up the CPU.
+    for (int i = 0; i < warmup_iters; i++) {
+        cv::Rect roi(left, top, width, height);
+        cv::Mat croppedImage = src(roi);
+        croppedImage.copyTo(dst);
+        dst = dst * scale;
+    }
+
+    for (auto _ : state) {
+        auto time_start = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < perf_iters; i++) {
+            cv::Rect roi(left, top, width, height);
+            cv::Mat croppedImage = src(roi);
+            croppedImage.copyTo(dst);
+            dst = dst * scale;
+        }
+        auto time_end = std::chrono::high_resolution_clock::now();
+        auto duration = time_end - time_start;
+        auto overall_time = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        double time = overall_time * 1.0 / perf_iters;
+        state.SetIterationTime(time * 1e-6);
+    }
+    state.SetItemsProcessed(state.iterations() * 1);
 }
+
+#define RUN_OPENCV_TYPE_FUNCTIONS(type, top, left, scale)                      \
+BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, type, c1, top, left, scale)->      \
+                   Args({640, 480})->UseManualTime()->Iterations(10);                                           \
+BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, type, c3, top, left, scale)->      \
+                   Args({640, 480})->UseManualTime()->Iterations(10);                                           \
+BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, type, c4, top, left, scale)->      \
+                   Args({640, 480})->UseManualTime()->Iterations(10);                                           \
+BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, type, c1, top, left, scale)->      \
+                   Args({1920, 1080})->UseManualTime()->Iterations(10);                                         \
+BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, type, c3, top, left, scale)->      \
+                   Args({1920, 1080})->UseManualTime()->Iterations(10);                                         \
+BENCHMARK_TEMPLATE(BM_Crop_opencv_x86, type, c4, top, left, scale)->      \
+                   Args({1920, 1080})->UseManualTime()->Iterations(10);
+
+RUN_OPENCV_TYPE_FUNCTIONS(uint8_t, 16, 16, 10)
+RUN_OPENCV_TYPE_FUNCTIONS(uint8_t, 16, 16, 15)
+RUN_OPENCV_TYPE_FUNCTIONS(float, 16, 16, 10)
+RUN_OPENCV_TYPE_FUNCTIONS(float, 16, 16, 15)
+
+#endif //! PPLCV_BENCHMARK_OPENCV

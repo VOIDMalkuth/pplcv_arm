@@ -16,40 +16,117 @@
 // under the License.
 
 #include "ppl/cv/x86/crop.h"
-#include "ppl/cv/x86/test.h"
-#include <memory>
-#include <gtest/gtest.h>
-#include "ppl/cv/debug.h"
 
-template<typename T, int32_t nc>
-void CropTest(int32_t inHeight, int32_t inWidth, int32_t outHeight, int32_t outWidth,
-                int32_t left, int32_t top, T diff) {
-    std::unique_ptr<T[]> src(new T[inWidth * inHeight * nc]);
-    std::unique_ptr<T[]> dst_ref(new T[inWidth * inHeight * nc]);
-    std::unique_ptr<T[]> dst(new T[outWidth * outHeight * nc]);
-    ppl::cv::debug::randomFill<T>(src.get(), inWidth * inHeight * nc, 0, 255);
-    ppl::cv::x86::Crop<T, nc>(inHeight, inWidth, inWidth * nc, src.get(),
-                            outHeight, outWidth, outWidth * nc, dst.get(),
-                            left, top, 1.0f);
-    cv::Mat srcMat(inHeight, inWidth, CV_MAKETYPE(cv::DataType<T>::depth, nc), src.get(), sizeof(T) * inWidth * nc);
-    cv::Mat dstMat(outHeight, outWidth, CV_MAKETYPE(cv::DataType<T>::depth, nc), dst_ref.get(), sizeof(T) * outWidth * nc);
-    cv::Rect roi(left, top, outWidth, outHeight);
-    cv::Mat croppedImage = srcMat(roi);
-    croppedImage.copyTo(dstMat);
-    checkResult<T, nc>(dst.get(), dst_ref.get(), outHeight, outWidth, outWidth * nc, outWidth * nc, 1.01f);
+#include <tuple>
+#include <sstream>
+
+#include "opencv2/core.hpp"
+#include "gtest/gtest.h"
+
+#include "utility/infrastructure.hpp"
+
+#define INT_PARAM_TO_FLOAT(x) ((x) / 10.0f)
+
+using Parameters = std::tuple<int, int, int, cv::Size>;
+inline std::string convertToStringCrop(const Parameters& parameters) {
+  std::ostringstream formatted;
+
+  int left = std::get<0>(parameters);
+  formatted << "Left" << left << "_";
+
+  int top = std::get<1>(parameters);
+  formatted << "Top" << top << "_";
+
+  float int_scale = std::get<2>(parameters);
+  formatted << "IntScale" << int_scale << "_";
+
+  cv::Size size = std::get<3>(parameters);
+  formatted << size.width << "x";
+  formatted << size.height;
+
+  return formatted.str();
 }
 
+template <typename T, int channels>
+class PplCvX86CropTest : public ::testing::TestWithParam<Parameters> {
+ public:
+  PplCvX86CropTest() {
+    const Parameters& parameters = GetParam();
+    left  = std::get<0>(parameters);
+    top   = std::get<1>(parameters);
+    scale = INT_PARAM_TO_FLOAT(std::get<2>(parameters));
+    size  = std::get<3>(parameters);
+  }
 
-TEST(CROP_FP32, x86)
-{
-    CropTest<float, 1>(720, 1080, 360, 540, 20, 40, 1e-3);
-    CropTest<float, 3>(720, 1080, 360, 540, 20, 40, 1e-3);
-    CropTest<float, 4>(720, 1080, 360, 540, 20, 40, 1e-3);
+  ~PplCvX86CropTest() {
+  }
+
+  bool apply();
+
+ private:
+  int left;
+  int top;
+  float scale;
+  cv::Size size;
+};
+
+template <typename T, int channels>
+bool PplCvX86CropTest<T, channels>::apply() {
+  int src_height = size.height * 2;
+  int src_width  = size.width * 2;
+  cv::Mat src = createSourceImage(src_height, src_width,
+                          CV_MAKETYPE(cv::DataType<T>::depth, channels));
+  cv::Mat dst(size.height, size.width,
+              CV_MAKETYPE(cv::DataType<T>::depth, channels));
+  cv::Mat cv_dst(size.height, size.width,
+                 CV_MAKETYPE(cv::DataType<T>::depth, channels));
+
+  cv::Rect roi(left, top, size.width, size.height);
+  cv::Mat croppedImage = src(roi);
+  croppedImage.copyTo(cv_dst);
+  cv_dst = cv_dst * scale;
+
+  ppl::cv::x86::Crop<T, channels>(src.rows, src.cols,
+      src.step / sizeof(T), (T*)src.data, dst.rows, dst.cols,
+      dst.step / sizeof(T), (T*)dst.data, left, top, scale);
+
+  float epsilon;
+  if (sizeof(T) == 1) {
+    epsilon = EPSILON_1F;
+  }
+  else {
+    epsilon = EPSILON_E6;
+  }
+  bool identity = checkMatricesIdentity<T>(cv_dst, dst, epsilon);
+
+  return identity;
 }
 
-TEST(CROP_UINT8, x86)
-{
-    CropTest<uint8_t, 1>(720, 1080, 360, 540, 20, 40, 1e-3);
-    CropTest<uint8_t, 3>(720, 1080, 360, 540, 20, 40, 1e-3);
-    CropTest<uint8_t, 4>(720, 1080, 360, 540, 20, 40, 1e-3);
-}
+#define UNITTEST(T, channels)                                                  \
+using PplCvX86CropTest_ ## T ## _ ## channels = PplCvX86CropTest<T, channels>;     \
+TEST_P(PplCvX86CropTest_ ## T ## _ ## channels, Standard) {                         \
+  bool identity = this->apply();                                               \
+  EXPECT_TRUE(identity);                                                       \
+}                                                                              \
+                                                                               \
+INSTANTIATE_TEST_CASE_P(IsEqual, PplCvX86CropTest_ ## T ## _ ## channels,           \
+  ::testing::Combine(                                                          \
+    ::testing::Values(0, 11, 187),                                             \
+    ::testing::Values(0, 11, 187),                                             \
+    ::testing::Values(0, 10, 15),                                              \
+    ::testing::Values(cv::Size{321, 240}, cv::Size{642, 480},                  \
+                      cv::Size{1283, 720}, cv::Size{1934, 1080},               \
+                      cv::Size{320, 240}, cv::Size{640, 480},                  \
+                      cv::Size{1280, 720}, cv::Size{1920, 1080})),             \
+  [](const testing::TestParamInfo<                                             \
+      PplCvX86CropTest_ ## T ## _ ## channels::ParamType>& info) {                  \
+    return convertToStringCrop(info.param);                                    \
+  }                                                                            \
+);
+
+UNITTEST(uint8_t, 1)
+UNITTEST(uint8_t, 3)
+UNITTEST(uint8_t, 4)
+UNITTEST(float, 1)
+UNITTEST(float, 3)
+UNITTEST(float, 4)
