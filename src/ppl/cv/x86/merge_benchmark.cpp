@@ -15,87 +15,141 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <benchmark/benchmark.h>
 #include "ppl/cv/x86/merge.h"
-#include <memory>
+
+#include "opencv2/core.hpp"
+#include "benchmark/benchmark.h"
+
 #include "ppl/cv/debug.h"
-
-namespace {
-
-template<typename T, int32_t nc>
-void BM_Merge_ppl_x86(benchmark::State &state) {
-    int32_t width = state.range(0);
-    int32_t height = state.range(1);
-    T *src[nc];
-    T *dst;
-    for (int32_t i = 0; i < nc; ++i) {
-        src[i] = new T[width * height];    
-        ppl::cv::debug::randomFill<T>(src[i], width * height, 0, 255);
-    } 
-    dst = new T[width * height * nc];
-
-    for (auto _ : state) {
-        if (nc == 3) {
-            ppl::cv::x86::Merge3Channels(height, width, width,
-                                    src[0], src[1], src[2], width * nc,
-                                    dst);
-        } else if (nc == 4) {
-            ppl::cv::x86::Merge4Channels(height, width, width,
-                                    src[0], src[1], src[2], src[3], width * nc,
-                                    dst);
-        }
-    }
-    state.SetItemsProcessed(state.iterations() * 1);
-    for (int32_t i = 0; i < nc; ++i) { 
-        delete[] src[i];
-    }
-    delete[] dst;
-}
+#include "utility/infrastructure.hpp"
 
 using namespace ppl::cv::debug;
 
-BENCHMARK_TEMPLATE(BM_Merge_ppl_x86, float, c3)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Merge_ppl_x86, float, c4)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Merge_ppl_x86, uint8_t, c3)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Merge_ppl_x86, uint8_t, c4)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
+template<typename T, int32_t channels>
+void BM_Merge_ppl_x86(benchmark::State &state) {
+    int32_t width = state.range(0);
+    int32_t height = state.range(1);
+    cv::Mat src0 = createSourceImage(height, width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat src1 = createSourceImage(height, width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat src2 = createSourceImage(height, width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat src3 = createSourceImage(height, width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat dst(height, width, CV_MAKETYPE(cv::DataType<T>::depth, channels));
+
+    int warmup_iters = 5;
+    int perf_iters = 50;
+
+    // Warm up the CPU.
+    for (int i = 0; i < warmup_iters; i++) {
+        if (channels == 3) {
+            ppl::cv::x86::Merge3Channels<T>(src0.rows, src0.cols,
+                src0.step / sizeof(T), (T*)src0.data, (T*)src1.data,
+                (T*)src2.data, dst.step / sizeof(T), (T*)dst.data);
+        } else {  // channels == 4
+            ppl::cv::x86::Merge4Channels<T>(src0.rows, src0.cols,
+                src0.step / sizeof(T), (T*)src0.data, (T*)src1.data,
+                (T*)src2.data, (T*)src3.data, dst.step / sizeof(T),
+                (T*)dst.data);
+        }
+    }
+
+    for (auto _ : state) {
+        auto time_start = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < perf_iters; i++) {
+            if (channels == 3) {
+                ppl::cv::x86::Merge3Channels<T>(src0.rows, src0.cols,
+                    src0.step / sizeof(T), (T*)src0.data, (T*)src1.data,
+                    (T*)src2.data, dst.step / sizeof(T), (T*)dst.data);
+            } else {  // channels == 4
+                ppl::cv::x86::Merge4Channels<T>(src0.rows, src0.cols,
+                    src0.step / sizeof(T), (T*)src0.data, (T*)src1.data,
+                    (T*)src2.data, (T*)src3.data, dst.step / sizeof(T),
+                    (T*)dst.data);
+            }
+        }
+        auto time_end = std::chrono::high_resolution_clock::now();
+        auto duration = time_end - time_start;
+        auto overall_time = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        double time = overall_time * 1.0 / perf_iters;
+        state.SetIterationTime(time * 1e-6);
+    }
+    state.SetItemsProcessed(state.iterations() * 1);
+}
+
+#define RUN_PPL_CV_TYPE_FUNCTIONS(type, channels)                                    \
+BENCHMARK_TEMPLATE(BM_Merge_ppl_x86, type, channels)->                       \
+                   Args({320, 240})->UseManualTime()->Iterations(10);          \
+BENCHMARK_TEMPLATE(BM_Merge_ppl_x86, type, channels)->                       \
+                   Args({640, 480})->UseManualTime()->Iterations(10);          \
+BENCHMARK_TEMPLATE(BM_Merge_ppl_x86, type, channels)->                       \
+                   Args({1280, 720})->UseManualTime()->Iterations(10);         \
+BENCHMARK_TEMPLATE(BM_Merge_ppl_x86, type, channels)->                       \
+                   Args({1920, 1080})->UseManualTime()->Iterations(10);
+
+RUN_PPL_CV_TYPE_FUNCTIONS(float, c3)
+RUN_PPL_CV_TYPE_FUNCTIONS(float, c4)
+RUN_PPL_CV_TYPE_FUNCTIONS(uint8_t, c3)
+RUN_PPL_CV_TYPE_FUNCTIONS(uint8_t, c4)
 
 #ifdef PPLCV_BENCHMARK_OPENCV
-template<typename T, int32_t nc>
+template<typename T, int32_t channels>
 static void BM_Merge_opencv_x86(benchmark::State &state)
 {
     int32_t width = state.range(0);
     int32_t height = state.range(1);
-    T *src[nc];
-    T *dst;
-    for (int32_t i = 0; i < nc; ++i) {
-        src[i] = new T[width * height];    
-        ppl::cv::debug::randomFill<T>(src[i], width * height, 0, 255);
-    } 
-    dst = new T[width * height * nc];
+    cv::Mat src0 = createSourceImage(height, width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat src1 = createSourceImage(height, width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat src2 = createSourceImage(height, width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat src3 = createSourceImage(height, width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat dst(height, width, CV_MAKETYPE(cv::DataType<T>::depth, channels));
 
-    cv::Mat src_opencv[nc];
-    cv::Mat dst_opencv;
-    
-    for (int32_t i = 0; i < nc; ++i) {
-        src_opencv[i] = cv::Mat(height, width, CV_MAKETYPE(cv::DataType<T>::depth, 1), src[i], sizeof(T) * width);
+    cv::Mat srcs0[3] = {src0, src1, src2};
+    cv::Mat srcs1[4] = {src0, src1, src2, src3};
+
+    int warmup_iters = 5;
+    int perf_iters = 50;
+
+    // Warm up the CPU.
+    for (int i = 0; i < warmup_iters; i++) {
+        if (channels == 3) {
+            cv::merge(srcs0, 3, dst);
+        }
+        else { // channels == 4
+            cv::merge(srcs1, 4, dst);
+        }
     }
-    dst_opencv = cv::Mat(height, width, CV_MAKETYPE(cv::DataType<T>::depth, nc), dst, sizeof(T) * width * nc);
 
     for (auto _ : state) {
-        cv::merge(src_opencv, nc, dst_opencv);
+        auto time_start = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < perf_iters; i++) {
+            if (channels == 3) {
+                cv::merge(srcs0, 3, dst);
+            }
+            else { // channels == 4
+                cv::merge(srcs1, 4, dst);
+            }
+        }
+        auto time_end = std::chrono::high_resolution_clock::now();
+        auto duration = time_end - time_start;
+        auto overall_time = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        double time = overall_time * 1.0 / perf_iters;
+        state.SetIterationTime(time * 1e-6);
     }
     state.SetItemsProcessed(state.iterations() * 1);
-
-    for (int32_t i = 0; i < nc; ++i) { 
-        delete[] src[i];
-    }
-    delete[] dst;
 }
 
-BENCHMARK_TEMPLATE(BM_Merge_opencv_x86, float, c3)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Merge_opencv_x86, float, c4)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Merge_opencv_x86, uint8_t, c3)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
-BENCHMARK_TEMPLATE(BM_Merge_opencv_x86, uint8_t, c4)->Args({320, 240})->Args({640, 480})->Args({1280, 720})->Args({1920, 1080})->Args({3840, 2160});
+#define RUN_OPENCV_TYPE_FUNCTIONS(type, channels)                                    \
+BENCHMARK_TEMPLATE(BM_Merge_opencv_x86, type, channels)->                       \
+                   Args({320, 240})->UseManualTime()->Iterations(10);          \
+BENCHMARK_TEMPLATE(BM_Merge_opencv_x86, type, channels)->                       \
+                   Args({640, 480})->UseManualTime()->Iterations(10);          \
+BENCHMARK_TEMPLATE(BM_Merge_opencv_x86, type, channels)->                       \
+                   Args({1280, 720})->UseManualTime()->Iterations(10);         \
+BENCHMARK_TEMPLATE(BM_Merge_opencv_x86, type, channels)->                       \
+                   Args({1920, 1080})->UseManualTime()->Iterations(10);
+
+RUN_OPENCV_TYPE_FUNCTIONS(float, c3)
+RUN_OPENCV_TYPE_FUNCTIONS(float, c4)
+RUN_OPENCV_TYPE_FUNCTIONS(uint8_t, c3)
+RUN_OPENCV_TYPE_FUNCTIONS(uint8_t, c4)
 
 #endif //! PPLCV_BENCHMARK_OPENCV
-}
