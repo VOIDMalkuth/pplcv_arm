@@ -16,63 +16,119 @@
 // under the License.
 
 #include "ppl/cv/x86/split.h"
-#include "ppl/cv/x86/test.h"
-#include <opencv2/imgproc.hpp>
-#include <memory>
-#include <gtest/gtest.h>
-#include "ppl/cv/debug.h"
 
-template <typename T, int32_t nc>
-void SplitTest(int32_t height, int32_t width, T diff)
-{
-    T *src = new T[width * height * nc];
-    T *dst[nc];
-    T *dst_ref[nc];
-    for (int32_t i = 0; i < nc; ++i) {
-        dst[i]     = new T[width * height];
-        dst_ref[i] = new T[width * height];
-    }
-    ppl::cv::debug::randomFill<T>(src, width * height * nc, 0, 255);
-    cv::Mat src_opencv(height, width, CV_MAKETYPE(cv::DataType<T>::depth, nc), src, sizeof(T) * width * nc);
-    cv::Mat dst_opencv[nc];
+#include <tuple>
+#include <sstream>
 
-    for (int32_t i = 0; i < nc; ++i) {
-        dst_opencv[i] = cv::Mat(height, width, CV_MAKETYPE(cv::DataType<T>::depth, 1), dst_ref[i], sizeof(T) * width);
+#include "opencv2/core.hpp"
+#include "gtest/gtest.h"
+
+#include "utility/infrastructure.hpp"
+
+using Parameters = std::tuple<cv::Size>;
+inline std::string convertToString(const Parameters& parameters) {
+  std::ostringstream formatted;
+
+  cv::Size size = std::get<0>(parameters);
+  formatted << size.width << "x";
+  formatted << size.height;
+
+  return formatted.str();
+}
+
+template <typename T, int channels>
+class PplCvX86SplitTest : public ::testing::TestWithParam<Parameters> {
+ public:
+  PplCvX86SplitTest() {
+    const Parameters& parameters = GetParam();
+    size = std::get<0>(parameters);
+  }
+
+  ~PplCvX86SplitTest() {
+  }
+
+  bool apply();
+
+ private:
+  cv::Size size;
+};
+
+template <typename T, int channels>
+bool PplCvX86SplitTest<T, channels>::apply() {
+    cv::Mat src = createSourceImage(size.height, size.width,
+                            CV_MAKETYPE(cv::DataType<T>::depth, channels));
+    cv::Mat dst0(size.height, size.width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat dst1(size.height, size.width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat dst2(size.height, size.width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat dst3(size.height, size.width, CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat cv_dst0(size.height, size.width,
+                    CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat cv_dst1(size.height, size.width,
+                    CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat cv_dst2(size.height, size.width,
+                    CV_MAKETYPE(cv::DataType<T>::depth, 1));
+    cv::Mat cv_dst3(size.height, size.width,
+                    CV_MAKETYPE(cv::DataType<T>::depth, 1));
+
+    if (channels == 3) {
+        cv::Mat dsts[3] = {cv_dst0, cv_dst1, cv_dst2};
+        cv::split(src, dsts);
+        ppl::cv::x86::Split3Channels<T>(src.rows, src.cols,
+            src.step / sizeof(T), (T*)src.data, dst0.step / sizeof(T),
+            (T*)dst0.data, (T*)dst1.data, (T*)dst2.data);
+    }
+    else {  // channels == 4
+        cv::Mat dsts[4] = {cv_dst0, cv_dst1, cv_dst2, cv_dst3};
+        cv::split(src, dsts);
+        ppl::cv::x86::Split4Channels<T>(src.rows, src.cols,
+            src.step / sizeof(T), (T*)src.data, dst0.step / sizeof(T),
+            (T*)dst0.data, (T*)dst1.data, (T*)dst2.data,
+            (T*)dst3.data);
     }
 
-    cv::split(src_opencv, dst_opencv);
-    if (nc == 3) {
-        ppl::cv::x86::Split3Channels(height, width, width * nc, src, width, dst[0], dst[1], dst[2]);
-    } else if (nc == 4) {
-        ppl::cv::x86::Split4Channels(height, width, width * nc, src, width, dst[0], dst[1], dst[2], dst[3]);
+    float epsilon;
+    if (sizeof(T) == 1) {
+        epsilon = EPSILON_1F;
     }
-    for (int32_t i = 0; i < nc; ++i) {
-        checkResult<T, 1>(dst_ref[i], dst[i], height, width, width, width, diff);
+    else {
+        epsilon = EPSILON_E6;
     }
-    delete[] src;
-    for (int32_t i = 0; i < nc; ++i) {
-        delete[] dst[i];
-        delete[] dst_ref[i];
+    bool identity0, identity1, identity2, identity3;
+    identity0 = checkMatricesIdentity<T>(cv_dst0, dst0, epsilon);
+    identity1 = checkMatricesIdentity<T>(cv_dst1, dst1, epsilon);
+    identity2 = checkMatricesIdentity<T>(cv_dst2, dst2, epsilon);
+    if (channels == 4) {
+        identity3 = checkMatricesIdentity<T>(cv_dst3, dst3, epsilon);
+    }
+
+    if (channels == 3) {
+        return (identity0 && identity1 && identity2);
+    }
+    else {
+        return (identity0 && identity1 && identity2 && identity3);
     }
 }
 
-TEST(SPLIT_FP32, x86)
-{
-    for (int32_t h = 720; h < 800; h += 15) {
-        for (int32_t w = 1080; w < 1280; w += 15) {
-            SplitTest<float, 3>(h, w, 0.01f);
-            SplitTest<float, 4>(h, w, 0.01f);
-        }
-    }
-}
+#define UNITTEST(T, channels)                                                  \
+using PplCvX86SplitTest_ ## T ## _ ## channels =                                    \
+        PplCvX86SplitTest<T,  channels>;                                      \
+TEST_P(PplCvX86SplitTest_ ## T ## _ ## channels, Standard) {                        \
+  bool identity = this->apply();                                               \
+  EXPECT_TRUE(identity);                                                       \
+}                                                                              \
+                                                                               \
+INSTANTIATE_TEST_CASE_P(IsEqual, PplCvX86SplitTest_ ## T ## _ ## channels,          \
+  ::testing::Values(cv::Size{321, 240}, cv::Size{642, 480},                    \
+                    cv::Size{1283, 720}, cv::Size{1934, 1080},                 \
+                    cv::Size{320, 240}, cv::Size{640, 480},                    \
+                    cv::Size{1280, 720}, cv::Size{1920, 1080}),                \
+  [](const testing::TestParamInfo<                                             \
+      PplCvX86SplitTest_ ## T ## _ ## channels::ParamType>& info) {                 \
+    return convertToString(info.param);                                        \
+  }                                                                            \
+);
 
-TEST(SPLIT_UINT8, x86)
-{
-    for (int32_t h = 720; h < 800; h += 15) {
-        for (int32_t w = 1080; w < 1280; w += 15) {
-            SplitTest<uint8_t, 3>(h, w, 1.01f);
-            SplitTest<uint8_t, 4>(h, w, 1.01f);
-        }
-    }
-    // SplitTest<uint8_t, 3>(16, 33, 1.01f);
-}
+UNITTEST(uint8_t, 3)
+UNITTEST(float, 3)
+UNITTEST(uint8_t, 4)
+UNITTEST(float, 4)

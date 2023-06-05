@@ -1,54 +1,105 @@
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with this
+ * work for additional information regarding copyright ownership. The ASF
+ * licenses this file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance with the
+ * License. You may obtain a copy of the License at
+ * http://www.apache.org/licenses/LICENSE-2.0.
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations
+ * under the License.
+ */
 
 #include "ppl/cv/x86/transpose.h"
-#include "ppl/cv/x86/test.h"
-#include <opencv2/imgproc.hpp>
-#include <memory>
-#include <gtest/gtest.h>
-#include "ppl/cv/debug.h"
-#include <iostream>
 
-template <typename T, int nc>
-void TransposeTest(int height, int width, T diff)
-{
-    std::unique_ptr<T[]> src(new T[width * height * nc]);
-    std::unique_ptr<T[]> dst_ref(new T[width * height * nc]);
-    std::unique_ptr<T[]> dst(new T[width * height * nc]);
-    ppl::cv::debug::randomFill<T>(src.get(), width * height * nc, 0, 255);
-    cv::Mat src_opencv(height, width, CV_MAKETYPE(cv::DataType<T>::depth, nc), src.get(), sizeof(T) * width * nc);
-    cv::Mat dst_opencv(width, height, CV_MAKETYPE(cv::DataType<T>::depth, nc), dst_ref.get(), sizeof(T) * height * nc);
+#include <tuple>
+#include <sstream>
 
-    cv::transpose(src_opencv, dst_opencv);
-    ppl::cv::x86::Transpose<T, nc>(height, width, width * nc, src.get(), height * nc, dst.get());
+#include "opencv2/core.hpp"
+#include "gtest/gtest.h"
 
-    checkResult<T, nc>(dst_ref.get(), dst.get(), width, height, height * nc, height * nc, diff);
+#include "utility/infrastructure.hpp"
+
+using Parameters = std::tuple<cv::Size>;
+inline std::string convertToString(const Parameters& parameters) {
+    std::ostringstream formatted;
+
+    cv::Size size = std::get<0>(parameters);
+    formatted << size.width << "x";
+    formatted << size.height;
+
+    return formatted.str();
 }
 
-TEST(Transpose_FP32, x86)
-{
-    TransposeTest<float, 1>(720, 1080, 1.01f);
-    TransposeTest<float, 3>(720, 1080, 1.01f);
-    TransposeTest<float, 4>(720, 1080, 1.01f);
+template <typename T, int channels>
+class PplCvX86TransposeTest : public ::testing::TestWithParam<Parameters> {
+public:
+    PplCvX86TransposeTest() {
+        const Parameters& parameters = GetParam();
+        size = std::get<0>(parameters);
+    }
+
+    ~PplCvX86TransposeTest() {
+    }
+
+    bool apply();
+
+    private:
+    cv::Size size;
+};
+
+template <typename T, int channels>
+bool PplCvX86TransposeTest<T, channels>::apply() {
+    cv::Mat src = createSourceImage(size.height, size.width,
+                            CV_MAKETYPE(cv::DataType<T>::depth, channels));
+    cv::Mat dst(size.width, size.height,
+                CV_MAKETYPE(cv::DataType<T>::depth, channels));
+    cv::Mat cv_dst(size.width, size.height,
+                    CV_MAKETYPE(cv::DataType<T>::depth, channels));
+    
+    cv::transpose(src, cv_dst);
+    ppl::cv::x86::Transpose<T, channels>(src.rows, src.cols,
+        src.step / sizeof(T), (T*)src.data, dst.step / sizeof(T),
+        (T*)dst.data);
+
+    float epsilon;
+    if (sizeof(T) == 1) {
+        epsilon = EPSILON_1F;
+    }
+    else {
+        epsilon = EPSILON_E6;
+    }
+    bool identity = checkMatricesIdentity<T>(cv_dst, dst, epsilon);
+
+    return identity;
 }
 
-TEST(Transpose_UINT8, x86)
-{
-    TransposeTest<uint8_t, 1>(720, 1080, 1.01f);
-    TransposeTest<uint8_t, 3>(720, 1080, 1.01f);
-    TransposeTest<uint8_t, 4>(720, 1080, 1.01f);
-}
+#define UNITTEST(T, channels)                                                  \
+using PplCvX86TransposeTest_ ## T ## _ ## channels =                                \
+        PplCvX86TransposeTest<T, channels>;                                   \
+TEST_P(PplCvX86TransposeTest_ ## T ## _ ## channels, Standard) {                    \
+  bool identity = this->apply();                                               \
+  EXPECT_TRUE(identity);                                                       \
+}                                                                              \
+                                                                               \
+INSTANTIATE_TEST_CASE_P(IsEqual, PplCvX86TransposeTest_ ## T ## _ ## channels,      \
+  ::testing::Values(cv::Size{321, 240}, cv::Size{642, 480},                    \
+                    cv::Size{1283, 720}, cv::Size{1976, 1080},                 \
+                    cv::Size{320, 240}, cv::Size{640, 480},                    \
+                    cv::Size{1280, 720}, cv::Size{1920, 1080}),                \
+  [](const testing::TestParamInfo<                                             \
+      PplCvX86TransposeTest_ ## T ## _ ## channels::ParamType>& info) {             \
+    return convertToString(info.param);                                        \
+  }                                                                            \
+);
+
+UNITTEST(uint8_t, 1)
+UNITTEST(uint8_t, 3)
+UNITTEST(uint8_t, 4)
+UNITTEST(float, 1)
+UNITTEST(float, 3)
+UNITTEST(float, 4)

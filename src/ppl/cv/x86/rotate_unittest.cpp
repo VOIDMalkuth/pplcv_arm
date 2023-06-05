@@ -16,137 +16,119 @@
 // under the License.
 
 #include "ppl/cv/x86/rotate.h"
-#include "ppl/cv/x86/test.h"
-#include <opencv2/imgproc.hpp>
-#include <memory>
-#include <gtest/gtest.h>
-#include "ppl/cv/debug.h"
-#include "ppl/common/retcode.h"
 
-template <typename T, int val>
-void randomRangeData(T *data, const size_t num, int maxNum = 255)
-{
-    size_t tmp;
+#include <tuple>
+#include <sstream>
 
-    for (size_t i = 0; i < num; i++) {
-        tmp     = rand() % maxNum;
-        data[i] = (T)((float)tmp / (float)val);
-    }
+#include "opencv2/core.hpp"
+#include "gtest/gtest.h"
+
+#include "utility/infrastructure.hpp"
+
+using Parameters = std::tuple<int, cv::Size>;
+inline std::string convertToStringRotate(const Parameters& parameters) {
+    std::ostringstream formatted;
+
+    int degree = std::get<0>(parameters);
+    formatted << "Degree" << degree << "_";
+
+    cv::Size size = std::get<1>(parameters);
+    formatted << size.width << "x";
+    formatted << size.height;
+
+    return formatted.str();
 }
 
-template <typename T, int c>
-class Rotate : public ::testing::TestWithParam<std::tuple<Size, int, float>> {
-public:
-    using RotateParam = std::tuple<Size, int, float>;
-    Rotate()
-    {
-    }
+template <typename T, int channels>
+class PplCvX86RotateTest : public ::testing::TestWithParam<Parameters> {
+ public:
+  PplCvX86RotateTest() {
+    const Parameters& parameters = GetParam();
+    degree = std::get<0>(parameters);
+    size   = std::get<1>(parameters);
+  }
 
-    ~Rotate()
-    {
-    }
+  ~PplCvX86RotateTest() {
+  }
 
-    void apply(const RotateParam &param)
-    {
-        Size size        = std::get<0>(param);
-        //int degree = std::get<1>(param);
-        const float diff = std::get<2>(param);
+  bool apply();
 
-        std::unique_ptr<T[]> src(new T[size.width * size.height * c]);
-        std::unique_ptr<T[]> src1(new T[size.width * size.height * c]);
-        std::unique_ptr<T[]> dst_ref(new T[size.width * size.height * c]);
-        std::unique_ptr<T[]> dst(new T[size.width * size.height * c]);
-
-        randomRangeData<T, 1>(src.get(), size.width * size.height * c);
-
-        ppl::cv::x86::RotateNx90degree<T, c>(
-            size.height,
-            size.width,
-            size.width * c,
-            src.get(),
-            size.width,
-            size.height,
-            size.height * c,
-            src1.get(),
-            90);
-
-        ppl::cv::x86::RotateNx90degree<T, c>(
-            size.width,
-            size.height,
-            size.height * c,
-            src1.get(),
-            size.height,
-            size.width,
-            size.width * c,
-            dst_ref.get(),
-            90);
-
-        ppl::cv::x86::RotateNx90degree<T, c>(
-            size.height,
-            size.width,
-            size.width * c,
-            src.get(),
-            size.height,
-            size.width,
-            size.width * c,
-            dst.get(),
-            180);
-
-        checkResult<T, c>(
-            dst_ref.get(),
-            dst.get(),
-            size.height,
-            size.width,
-            size.width * c,
-            size.width * c,
-            diff);
-
-        ppl::cv::x86::RotateNx90degree<T, c>(
-            size.height,
-            size.width,
-            size.width * c,
-            src.get(),
-            size.width,
-            size.height,
-            size.height * c,
-            src1.get(),
-            270);
-
-        ppl::cv::x86::RotateNx90degree<T, c>(
-            size.height,
-            size.width,
-            size.width * c,
-            dst_ref.get(),
-            size.width,
-            size.height,
-            size.height * c,
-            dst.get(),
-            90);
-
-        checkResult<T, c>(
-            dst.get(),
-            src1.get(),
-            size.width,
-            size.height,
-            size.height * c,
-            size.height * c,
-            diff);
-    }
+ private:
+  int degree;
+  cv::Size size;
 };
 
-#define R1(name, t, c, diff)     \
-    using name = Rotate<t, c>;   \
-    TEST_P(name, abc)            \
-    {                            \
-        this->apply(GetParam()); \
-    }                            \
-    INSTANTIATE_TEST_CASE_P(standard, name, ::testing::Combine(::testing::Values(Size{320, 256}, Size{720, 480}, Size{723, 483}, Size{777, 333}, Size{31, 31}, Size{17, 101}, Size{65, 65}, Size{97, 107}), ::testing::Values(90), ::testing::Values(diff)));
-R1(Rotate_f32c1, float, 1, 1e-5)
-R1(Rotate_f32c2, float, 2, 1e-5)
-R1(Rotate_f32c3, float, 3, 1e-5)
-R1(Rotate_f32c4, float, 4, 1e-5)
+template <typename T, int channels>
+bool PplCvX86RotateTest<T, channels>::apply() {
+  int dst_height, dst_width;
+  cv::RotateFlags cv_rotate_flag;
+  if (degree == 90) {
+    dst_height = size.width;
+    dst_width  = size.height;
+    cv_rotate_flag = cv::ROTATE_90_CLOCKWISE;
+  }
+  else if (degree == 180) {
+    dst_height = size.height;
+    dst_width  = size.width;
+    cv_rotate_flag = cv::ROTATE_180;
+  }
+  else if (degree == 270) {
+    dst_height = size.width;
+    dst_width  = size.height;
+    cv_rotate_flag = cv::ROTATE_90_COUNTERCLOCKWISE;
+  }
+  else {
+    return false;
+  }
 
-R1(Rotate_u8c1, uint8_t, 1, 1)
-R1(Rotate_u8c2, uint8_t, 2, 1)
-R1(Rotate_u8c3, uint8_t, 3, 1)
-R1(Rotate_u8c4, uint8_t, 4, 1)
+  cv::Mat src = createSourceImage(size.height, size.width,
+                          CV_MAKETYPE(cv::DataType<T>::depth, channels));
+  cv::Mat dst(dst_height, dst_width,
+              CV_MAKETYPE(cv::DataType<T>::depth, channels));
+  cv::Mat cv_dst(dst_height, dst_width,
+                 CV_MAKETYPE(cv::DataType<T>::depth, channels));
+
+  cv::rotate(src, cv_dst, cv_rotate_flag);
+
+  ppl::cv::x86::RotateNx90degree<T, channels>(size.height, size.width,
+      src.step / sizeof(T), (T*)src.data, dst_height, dst_width,
+      dst.step / sizeof(T), (T*)dst.data, degree);
+
+  float epsilon;
+  if (sizeof(T) == 1) {
+    epsilon = EPSILON_1F;
+  }
+  else {
+    epsilon = EPSILON_E6;
+  }
+  bool identity = checkMatricesIdentity<T>(cv_dst, dst, epsilon);
+
+  return identity;
+}
+
+#define UNITTEST(T, channels)                                                  \
+using PplCvX86RotateTest_ ## T ## _ ## channels = PplCvX86RotateTest<T, channels>; \
+TEST_P(PplCvX86RotateTest_ ## T ## _ ## channels, Standard) {                       \
+  bool identity = this->apply();                                               \
+  EXPECT_TRUE(identity);                                                       \
+}                                                                              \
+                                                                               \
+INSTANTIATE_TEST_CASE_P(IsEqual, PplCvX86RotateTest_ ## T ## _ ## channels,         \
+  ::testing::Combine(                                                          \
+    ::testing::Values(90, 180, 270),                                           \
+    ::testing::Values(cv::Size{321, 240}, cv::Size{642, 480},                  \
+                      cv::Size{1283, 720}, cv::Size{1934, 1080},               \
+                      cv::Size{320, 240}, cv::Size{640, 480},                  \
+                      cv::Size{1280, 720}, cv::Size{1920, 1080})),             \
+  [](const testing::TestParamInfo<                                             \
+      PplCvX86RotateTest_ ## T ## _ ## channels::ParamType>& info) {                \
+    return convertToStringRotate(info.param);                                  \
+  }                                                                            \
+);
+
+UNITTEST(uint8_t, 1)
+UNITTEST(uint8_t, 3)
+UNITTEST(uint8_t, 4)
+UNITTEST(float, 1)
+UNITTEST(float, 3)
+UNITTEST(float, 4)
